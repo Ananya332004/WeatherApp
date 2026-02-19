@@ -1,9 +1,16 @@
 import { API_KEY, BASE_URL } from '../config/api';
 
 /**
- * Generic fetch handler with error management
+ * Delay helper for retry logic
  */
-async function apiFetch(endpoint, params = {}) {
+function delay(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Generic fetch handler with error management and automatic retry
+ */
+async function apiFetch(endpoint, params = {}, retries = 3) {
     const queryParams = new URLSearchParams({
         access_key: API_KEY,
         ...params,
@@ -11,22 +18,41 @@ async function apiFetch(endpoint, params = {}) {
 
     const url = `${BASE_URL}/${endpoint}?${queryParams.toString()}`;
 
-    try {
-        const response = await fetch(url);
-        if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status}`);
-        }
-        const data = await response.json();
+    let lastError;
 
-        if (data.success === false) {
-            throw new Error(data.error?.info || 'An unknown API error occurred');
-        }
+    for (let attempt = 1; attempt <= retries; attempt++) {
+        try {
+            const response = await fetch(url);
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+            const data = await response.json();
 
-        return data;
-    } catch (error) {
-        console.error(`API Error [${endpoint}]:`, error);
-        throw error;
+            if (data.success === false) {
+                throw new Error(data.error?.info || 'An unknown API error occurred');
+            }
+
+            return data;
+        } catch (error) {
+            lastError = error;
+            console.warn(`API attempt ${attempt}/${retries} failed [${endpoint}]:`, error.message);
+
+            // Don't retry on API-level errors (plan limitations, invalid params, etc.)
+            if (error.message.includes('Your monthly') ||
+                error.message.includes('not_supported_on_plan') ||
+                error.message.includes('invalid') ||
+                error.message.includes('missing')) {
+                break;
+            }
+
+            if (attempt < retries) {
+                await delay(1000 * attempt); // Progressive delay: 1s, 2s, 3s
+            }
+        }
     }
+
+    console.error(`API Error [${endpoint}]: All ${retries} attempts failed`, lastError);
+    throw lastError;
 }
 
 /**
